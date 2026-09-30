@@ -1,0 +1,67 @@
+# Push a tag like v0.1.0 to build macOS and Windows and publish a GitHub release.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - run: cargo build --release --target aarch64-apple-darwin
+      - run: cargo build --release --target x86_64-apple-darwin
+      - name: Bundle universal .app
+        run: |
+          app="Video Speed.app"
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p "$app/Contents/MacOS"
+          lipo -create -output "$app/Contents/MacOS/video-speed" target/{aarch64,x86_64}-apple-darwin/release/video-speed
+          cat > "$app/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>Video Speed</string>
+            <key>CFBundleIdentifier</key><string>com.joshwrn.video-speed</string>
+            <key>CFBundleExecutable</key><string>video-speed</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>$version</string>
+            <key>CFBundleVersion</key><string>$version</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          EOF
+          # ponytail: ad-hoc signed only, so Gatekeeper needs "Open Anyway"; add Developer ID signing + notarization to drop that step.
+          codesign --force --sign - "$app"
+          ditto -c -k --keepParent "$app" Video-Speed-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: Video-Speed-macOS.zip
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release
+      - run: Compress-Archive target/release/video-speed.exe Video-Speed-Windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: Video-Speed-Windows-x64.zip
+
+  release:
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes *.zip
+        env:
+          GH_TOKEN: ${{ github.token }}

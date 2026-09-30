@@ -430,10 +430,13 @@ fn atempo(mut rate: f64) -> String {
     filters.join(",")
 }
 
-// ponytail: expects ffmpeg/ffprobe on PATH; a Finder-launched macOS .app won't see Homebrew's PATH, bundle ffmpeg when packaging.
+// ponytail: expects a user-installed ffmpeg/ffprobe; bundle them if installing ffmpeg is too much to ask of users.
 fn tool(program: &str) -> Command {
     #[allow(unused_mut)]
     let mut command = Command::new(program);
+    // A Finder-launched .app gets PATH=/usr/bin:/bin:..., so also look where Homebrew installs.
+    #[cfg(target_os = "macos")]
+    command.env("PATH", format!("{}:/opt/homebrew/bin:/usr/local/bin", std::env::var("PATH").unwrap_or_default()));
     #[cfg(windows)]
     std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000); // CREATE_NO_WINDOW
     command
@@ -559,8 +562,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        Command, StepAction, atempo, clock, extract_preview, ffmpeg, parse_speed, playback_rate, probe_duration, run, speed_step,
-        speed_up,
+        StepAction, atempo, clock, extract_preview, ffmpeg, parse_speed, playback_rate, probe_duration, run, speed_step,
+        speed_up, tool,
     };
 
     #[test]
@@ -620,7 +623,7 @@ mod tests {
             let mut written = 0.;
             smol::block_on(speed_up(&input, &output, rate, remove_audio, cancel.clone(), |s| written = s)).unwrap();
             assert!((written - expected).abs() < tolerance, "{rate} rate reported {written}s");
-            let probe = Command::new("ffprobe")
+            let probe = tool("ffprobe")
                 .args(["-v", "error", "-show_entries", "format=duration:stream=codec_type", "-of", "csv=p=0"])
                 .arg(&output)
                 .output()
