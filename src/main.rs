@@ -5,11 +5,10 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, StyledExt as _, Theme, ThemeMode, TitleBar, WindowExt as _,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, StyledExt as _, Theme, ThemeMode, TitleBar, WindowExt as _,
     alert::Alert,
     button::{Button, ButtonVariants as _},
-    empty::{Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle},
-    form::{Field, Form},
+    empty::{Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle},
     input::{InputState, MaskPattern, NumberInput, StepAction},
     label::Label,
     notification::Notification,
@@ -52,6 +51,8 @@ impl VideoSpeed {
                 .max(MAX_SPEED)
                 .step_by(|value, action, _| speed_step(value, action))
         });
+        // Redraw the output length as the speed changes.
+        cx.observe(&speed, |_, _, cx| cx.notify()).detach();
         Self {
             input: None,
             duration: None,
@@ -167,13 +168,19 @@ impl Render for VideoSpeed {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let busy = self.job.is_some();
         let loading = self.input.is_some() && self.preview.is_none() && self.error.is_none();
+        let theme = cx.theme();
+        // Source length, and the output length once the speed is valid: "0:12 → 0:06".
+        let lengths = self.duration.map(|duration| match parse_speed(&self.speed.read(cx).value()) {
+            Some(speed) => format!("{} → {}", clock(duration), clock(duration / playback_rate(speed))),
+            None => clock(duration),
+        });
 
         div()
             .v_flex()
             .size_full()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
-            .child(TitleBar::new().child("Video Speed"))
+            .bg(theme.background)
+            .text_color(theme.foreground)
+            .child(TitleBar::new().child(div().text_sm().font_medium().child("Video Speed")))
             .child(
                 div()
                     .v_flex()
@@ -183,25 +190,9 @@ impl Render for VideoSpeed {
                     .gap_4()
                     .child(
                         div()
-                            .h_flex()
-                            .gap_3()
-                            .child(
-                                Button::new("choose")
-                                    .outline()
-                                    .label("Choose video…")
-                                    .disabled(busy)
-                                    .on_click(cx.listener(|this, _, _, cx| this.choose_file(cx))),
-                            )
-                            .when_some(self.input.as_ref(), |this, path| {
-                                let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                                this.child(Label::new(name).flex_1().min_w_0().truncate())
-                            }),
-                    )
-                    .child(
-                        div()
                             .flex_1()
                             .min_h(px(200.))
-                            .rounded(cx.theme().radius)
+                            .rounded(theme.radius_lg)
                             .overflow_hidden()
                             .drag_over::<ExternalPaths>(|style, _, _, cx| style.bg(cx.theme().accent))
                             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
@@ -210,46 +201,118 @@ impl Render for VideoSpeed {
                                 }
                             }))
                             .map(|this| match &self.preview {
-                                Some(image) => this.bg(cx.theme().muted).child(img(image.clone()).size_full()),
+                                // Absolute, so a short window letterboxes the frame instead of cropping it.
+                                Some(image) => this.relative().bg(gpui_kit::black()).child(
+                                    img(image.clone()).absolute().size_full().object_fit(ObjectFit::Contain),
+                                ),
                                 None => this.child(
-                                    Empty::new().size_full().border_1().rounded(cx.theme().radius).header(
-                                        EmptyHeader::new()
-                                            .media(EmptyMedia::new().with_variant(EmptyMediaVariant::Icon).map(|media| {
-                                                if loading {
-                                                    media.child(Spinner::new())
+                                    Empty::new()
+                                        .size_full()
+                                        .border_1()
+                                        .rounded(theme.radius_lg)
+                                        .header(
+                                            EmptyHeader::new()
+                                                .media(
+                                                    EmptyMedia::new()
+                                                        .with_variant(EmptyMediaVariant::Icon)
+                                                        .size_12()
+                                                        .rounded_full()
+                                                        .text_xl()
+                                                        .map(|media| {
+                                                            if loading {
+                                                                media.child(Spinner::new())
+                                                            } else {
+                                                                media.child(Icon::new(IconName::Inbox))
+                                                            }
+                                                        }),
+                                                )
+                                                .title(EmptyTitle::new().child(if loading {
+                                                    "Loading preview"
                                                 } else {
-                                                    media.child(Icon::new(IconName::Inbox))
-                                                }
-                                            }))
-                                            .title(EmptyTitle::new().child(if loading { "Loading preview" } else { "Drop a video here" }))
-                                            .when(!loading, |header| {
-                                                header.description(EmptyDescription::new().child("Or use Choose video… above."))
-                                            }),
-                                    ),
+                                                    "Drop a video here"
+                                                }))
+                                                .when(!loading, |header| {
+                                                    header.description(
+                                                        EmptyDescription::new().child("MP4, MOV, MKV and anything else ffmpeg reads."),
+                                                    )
+                                                }),
+                                        )
+                                        .when(self.input.is_none(), |empty| {
+                                            empty.content(
+                                                EmptyContent::new().child(
+                                                    Button::new("choose")
+                                                        .outline()
+                                                        .label("Choose video")
+                                                        .on_click(cx.listener(|this, _, _, cx| this.choose_file(cx))),
+                                                ),
+                                            )
+                                        }),
                                 ),
                             }),
                     )
-                    .child(
-                        Form::new()
-                            .columns(2)
-                            .child(
-                                Field::new()
-                                    .label("Speed")
-                                    .description("Negative slows it down: -2x is half speed.")
-                                    .child(NumberInput::new(&self.speed).suffix("x").disabled(busy)),
-                            )
-                            .child(
-                                Field::new().label("Audio").child(
-                                    Switch::new("remove-audio")
-                                        .label("Remove audio")
-                                        .checked(self.remove_audio)
+                    .when_some(self.input.as_ref(), |this, path| {
+                        let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                        this.child(
+                            div()
+                                .h_flex()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_shrink_0()
+                                        .size_9()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded(theme.radius)
+                                        .bg(theme.muted)
+                                        .child(Icon::new(IconName::Play).text_color(theme.muted_foreground)),
+                                )
+                                .child(
+                                    div()
+                                        .v_flex()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(Label::new(name).text_sm().font_medium().truncate())
+                                        .when_some(lengths, |this, lengths| {
+                                            this.child(div().text_xs().text_color(theme.muted_foreground).child(lengths))
+                                        }),
+                                )
+                                .child(
+                                    Button::new("replace")
+                                        .ghost()
+                                        .small()
+                                        .label("Replace")
                                         .disabled(busy)
-                                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                            this.remove_audio = *checked;
-                                            cx.notify();
-                                        })),
+                                        .on_click(cx.listener(|this, _, _, cx| this.choose_file(cx))),
                                 ),
-                            ),
+                        )
+                    })
+                    .child(
+                        div()
+                            .v_flex()
+                            .rounded(theme.radius_lg)
+                            .border_1()
+                            .border_color(theme.border)
+                            .child(setting(
+                                "Speed",
+                                "Negative slows it down: -2x is half speed.",
+                                NumberInput::new(&self.speed).suffix("x").w(px(132.)).disabled(busy),
+                                cx,
+                            ))
+                            .child(div().h_px().bg(theme.border))
+                            .child(setting(
+                                "Remove audio",
+                                "Export a silent video.",
+                                Switch::new("remove-audio")
+                                    .accessibility_label("Remove audio")
+                                    .checked(self.remove_audio)
+                                    .disabled(busy)
+                                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                        this.remove_audio = *checked;
+                                        cx.notify();
+                                    })),
+                                cx,
+                            )),
                     )
                     .when_some(self.error.clone(), |this, error| this.child(Alert::error("error", error)))
                     .map(|this| match &self.job {
@@ -258,13 +321,32 @@ impl Render for VideoSpeed {
                             this.child(
                                 div()
                                     .h_flex()
-                                    .gap_3()
+                                    .gap_4()
+                                    .h_10()
                                     .child(
-                                        div().flex_1().child(
-                                            Progress::new("progress")
-                                                .value(self.progress.unwrap_or(0.))
-                                                .loading(self.progress.is_none()),
-                                        ),
+                                        div()
+                                            .v_flex()
+                                            .flex_1()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .h_flex()
+                                                    .justify_between()
+                                                    .text_xs()
+                                                    .child(div().font_medium().child("Exporting…"))
+                                                    .when_some(self.progress, |this, progress| {
+                                                        this.child(
+                                                            div()
+                                                                .text_color(theme.muted_foreground)
+                                                                .child(format!("{}%", progress.min(100.) as u32)),
+                                                        )
+                                                    }),
+                                            )
+                                            .child(
+                                                Progress::new("progress")
+                                                    .value(self.progress.unwrap_or(0.))
+                                                    .loading(self.progress.is_none()),
+                                            ),
                                     )
                                     .child(Button::new("cancel").outline().label("Cancel").on_click(move |_, _, _| {
                                         job.close();
@@ -274,13 +356,41 @@ impl Render for VideoSpeed {
                         None => this.child(
                             Button::new("process")
                                 .primary()
+                                .large()
                                 .w_full()
-                                .label("Process…")
+                                .label("Export…")
                                 .disabled(self.input.is_none())
                                 .on_click(cx.listener(|this, _, window, cx| this.process(window, cx))),
                         ),
                     }),
             )
+    }
+}
+
+/// A settings row: title and hint on the left, `control` on the right.
+fn setting(title: &'static str, hint: &'static str, control: impl IntoElement, cx: &App) -> Div {
+    div()
+        .h_flex()
+        .gap_4()
+        .px_4()
+        .py_3()
+        .child(
+            div()
+                .v_flex()
+                .flex_1()
+                .gap_0p5()
+                .child(div().text_sm().font_medium().child(title))
+                .child(div().text_xs().text_color(cx.theme().muted_foreground).child(hint)),
+        )
+        .child(control)
+}
+
+/// Seconds as m:ss, or h:mm:ss past an hour.
+fn clock(seconds: f64) -> String {
+    let s = seconds.round() as u64;
+    match s / 3600 {
+        0 => format!("{}:{:02}", s / 60, s % 60),
+        h => format!("{h}:{:02}:{:02}", s / 60 % 60, s % 60),
     }
 }
 
@@ -449,7 +559,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        Command, StepAction, atempo, extract_preview, ffmpeg, parse_speed, playback_rate, probe_duration, run, speed_step,
+        Command, StepAction, atempo, clock, extract_preview, ffmpeg, parse_speed, playback_rate, probe_duration, run, speed_step,
         speed_up,
     };
 
@@ -471,6 +581,9 @@ mod tests {
         assert_eq!(atempo(2.), "atempo=2");
         assert_eq!(atempo(0.25), "atempo=0.5,atempo=0.5");
         assert_eq!(atempo(0.01).split(',').count(), 7);
+        assert_eq!(clock(5.4), "0:05");
+        assert_eq!(clock(125.), "2:05");
+        assert_eq!(clock(3725.), "1:02:05");
 
         use StepAction::{Decrement as Down, Increment as Up};
         for (value, action, expected) in [
